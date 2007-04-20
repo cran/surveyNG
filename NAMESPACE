@@ -1,0 +1,13 @@
+import(survey, stats, graphics)
+export(sqlsurvey, sqlmodelmatrix,sqlvar,sqlsubst)
+
+S3method(close,sqlsurvey)
+S3method(open,sqlsurvey)
+S3method(open, sqlmodelmatrix)
+S3method(subset, sqlsurvey)
+S3method(print,sqlsurvey)
+S3method(dim,sqlsurvey)
+S3method(svymean,sqlsurvey)
+S3method(svytotal, sqlsurvey)
+S3method(svyquantile, sqlsurvey)
+S3method(svytable, sqlsurvey)
