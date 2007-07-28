@@ -27,7 +27,7 @@ make.zdata<-function(db, table, factors=9){
 }
 
 close.sqlsurvey<-function(con, tidy=TRUE,...){
-  gc()
+  gc() ## make sure any dead model matrices are finalized.
   if(!isIdCurrent(con$conn)){
     warning("connection already closed")
     return(TRUE)
@@ -133,7 +133,7 @@ subset.sqlsurvey<-function(x,subset,...){
   x
 }
 
-sqlsurvey<-function(id, strata=NULL, weights=NULL, fpc=NULL,
+sqlsurvey<-function(id, strata=NULL, weights=NULL, fpc="0",
                        data, table.name=basename(tempfile("_tbl_")),
                        key="row_names"){
 library(RSQLite)
@@ -417,6 +417,72 @@ svyquantile.sqlsurvey<-function(x,design, quantiles,build.index=FALSE,...){
 
 
 
+
+svylm<-function(formula, design){
+  tms<-terms(formula)
+  yname<-as.character(attr(tms,"variables")[[2]])
+  ## handle subpopulations
+  if (is.null(design$subset)){
+    tablename<-design$table
+    wtname<-design$weights
+  } else {
+    tablename<-sqlsubst(" %%tbl%% inner join %%subset%% using(%%key%%) ",
+                        list(tbl=design$table, subset=design$subset$table, key=design$key))
+    wtname<-design$subset$weights
+  }
+  
+
+  mm<-sqlmodelmatrix(formula, design, fullrank=TRUE)
+  termnames<-mm$terms
+  tablename<-sqlsubst("%%tbl%% inner join %%mm%% using(%%key%%)",
+                        list(tbl=tablename,mm=mm$table, key=design$key))
+
+   p<-length(termnames)
+   mfy<-basename(tempfile("_y_"))
+   sumxy<-paste("sum(",termnames,"*%%mfy%%*%%wt%%) as _xy_",termnames,sep="")
+   sumsq<-outer(termnames,termnames, function(i,j) paste("sum(",i,"*",j,"*%%wt%%)",sep=""))
+
+   qxwx<-sqlsubst("select %%sumsq%% from %%table%%" ,
+                     list(sumsq=sumsq, table=tablename, wt=wtname)
+                     )
+   xwx<-matrix(as.matrix(dbGetQuery(design$conn, qxwx)),p,p)
+   qxwy <- sqlsubst("select %%sumxy%% from %%tablename%% inner join (select %%y%% as %%mfy%%, %%key%% from %%mf%%) using(%%key%%)", 
+        list(sumxy = sumxy, y = yname, key = design$key, tablename = tablename, 
+        mf=mm$mf, wt=wtname, mfy=mfy))
+   xwy<-drop(as.matrix(dbGetQuery(design$conn, qxwy)))
+   beta<-solve(xwx,xwy)
+
+   xytab<-basename(tempfile("_xyt_"))
+   muname<-basename(tempfile("_mu_"))
+   qmu<-paste("(",paste(termnames,"*",formatC(beta,format="fg",digits=16),collapse="+"),") as ",muname)
+   qxytab<-sqlsubst("create table %%xytab%% as select %%x%%, %%y%%, %%qmu%%, %%key%% from (select %%y%%, %%key%% from %%mf%%) inner join %%mm%% using(%%key%%)", list(xytab=xytab, x=termnames,
+    y=yname, key=design$key,qmu=qmu,mf=mm$mf,mm=mm$table))       
+   dbGetQuery(design$conn, qxytab)
+   on.exit(dbGetQuery(design$conn, paste("drop table ",xytab)),add=TRUE)
+   
+   Utable<-basename(tempfile("_U_"))
+   unames<-paste("_U_", termnames, sep="")
+   u<-paste(termnames,"*(",yname,"-",muname,") as ",unames)
+   qu<-sqlsubst("create table %%utable%% as select %%u%%, %%key%% from %%xytab%%",
+   	list(key=design$key, utable=Utable, u=u,xytab=xytab))  
+   dbGetQuery(design$conn, qu)
+   on.exit(dbGetQuery(design$conn,paste("drop table ",Utable)),add=TRUE)
+
+   Uvar<-sqlvar(unames,Utable, design)
+   xwxinv<-solve(xwx)
+   v<-xwxinv%*%Uvar%*%xwxinv
+   names(beta)<-termnames
+   dimnames(v)<-list(termnames, termnames)
+   attr(beta, "var")<-v
+   beta
+}
+
+dim.sqlmm<-function(x){
+	n<-dbGetQuery(x$conn, sqlsubst("select count(*) from %%table%%",list(table=x$table)))[[1]]
+	p<-length(x$terms)
+	c(n,p) 	
+}
+
 sqlvar<-function(U, utable, design){
    nstages<-length(design$id)
    units<-NULL
@@ -534,6 +600,9 @@ sqlmodelmatrix<-function(formula, design, fullrank=TRUE){
   dbGetQuery(design$conn, sqlsubst("create table %%mf%% as select %%key%%, %%vars%% from %%table%%",
                                list(mf=mftable, vars=all.vars(formula), table=design$table,
                                     id=design$id, strata=design$strata,key=design$key)))
+  dbGetQuery(design$conn, sqlsubst("create unique index %%idx%% on %%tbl%%(%%key%%)",
+                                   list(idx=basename(tempfile("idx")), tbl=mftable,
+                                        key=design$key)))
 
 
   patmat<-attr(tms,"factors")
@@ -592,3 +661,6 @@ sqlmmDrop<-function(mmobj){
   dbGetQuery(mmobj$conn,sqlsubst("drop table %%mf%%", list(mf=mmobj$mf)))
   invisible(NULL)
 }
+
+head.sqlmm<-function(x,n=6,...) dbGetQuery(x$conn,
+     sqlsubst("select * from %%mm%% limit %nn%", list(mm=x$table,nn=n)))

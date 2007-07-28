@@ -2,6 +2,7 @@
 \alias{sqlsurvey}
 \alias{open.sqlsurvey}
 \alias{close.sqlsurvey}
+\alias{dim.sqlsurvey}
 \alias{open.sqlmodelmatrix}
 %- Also NEED an '\alias' for EACH other topic documented here.
 \title{Survey design based on SQL database}
@@ -12,7 +13,7 @@ that will be written out to a database. If data are in an existing
 database they should be in a single table in denormalized form.
 }
 \usage{
-sqlsurvey(id, strata = NULL, weights = NULL, fpc = NULL, data,
+sqlsurvey(id, strata = NULL, weights = NULL, fpc = "0", data,
 table.name = basename(tempfile("_tbl_")), key = "row_names")
 \method{close}{sqlsurvey}(con, tidy=TRUE, ...)
 \method{open}{sqlsurvey}(con, db=NULL,...)
