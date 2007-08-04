@@ -1,5 +1,6 @@
 import(survey, stats, graphics)
-export(sqlsurvey, sqlmodelmatrix,sqlvar,sqlsubst, svylm)
+export(sqlsurvey, sqlmodelmatrix,sqlvar,sqlsubst, svylm,
+      sqlocpoly, sqlhexbin)
 
 S3method(close,sqlsurvey)
 S3method(open,sqlsurvey)

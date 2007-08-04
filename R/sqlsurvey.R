@@ -4,12 +4,14 @@ make.zdata<-function(db, table, factors=9){
   rval<-dbGetQuery(db,sqlsubst("select * from %%tbl%% limit 1",
                             list(tbl=table)))
   if (length(factors)==0) return(rval[FALSE,])
+  rval<-as.list(rval) 	## lists are faster
   if(is.character(factors)){
     for(f in factors){
       levs<- dbGetQuery(db,sqlsubst("select distinct %%v%% from %%tbl%% order by %%v%%",
                         list(v=f,tbl=table)))[[1]]
       rval[[f]]<-factor(rval[[f]],  levels=levs)
     }
+    class(rval)<-"data.frame"
     return(rval[FALSE,])
   } else { ##numeric limit on levels
     for(f in names(rval)){
@@ -21,6 +23,7 @@ make.zdata<-function(db, table, factors=9){
       if (length(na.omit(levs))<=factors)
         rval[[f]]<-factor(rval[[f]],  levels=levs)
     }
+    class(rval)<-"data.frame"
     return(rval[FALSE,])
   }
   
@@ -46,6 +49,8 @@ open.sqlsurvey<-function(con, db=NULL, ...){
   if (is.null(con$dbname))
     stop("design used a temporary database")
   if (is.null(db)){
+    if(!file.exists(con$dbname))
+       stop("database file",con$dbname,"not found")
     con$conn<-dbConnect(sqlite, dbname=con$dbname)
   }else{
     if (isIdCurrent(db))
@@ -73,6 +78,89 @@ finalizeSubset<-function(e){
 }
 
 
+linbin<-function(x,table,design,M=401,lim=NULL,y=NULL){
+  if (M>800) stop("too many grid points")
+  if (is.null(design$subset)){
+    tablename<-table
+    wtname<-design$weights
+  } else {
+    tablename<-sqlsubst(" %%tbl%% inner join %%subset%% using(%%key%%) ",
+                        list(tbl=table, subset=design$subset$table, key=design$key))
+    wtname<-design$subset$weights
+  }
+  if(is.null(lim)){
+	xrange<-dbGetQuery(design$conn, sqlsubst("select min(%%x%%) as low, max(%%x%%) as up from %%tbl%%",
+					list(x=x,tbl=tablename)))
+	lim=c(xrange[1,"low"],xrange[1,"up"])
+  }
+  gridp<-seq(lim[1], lim[2], length=M)
+  lownames<-paste("low",1:M,sep="")[-M]
+  upnames<-paste("up",1:M, sep="")[-1]
+  lowexpr<-paste("(%%x%% -",gridp[-M],")")
+  upexpr<-paste("(",gridp[-M],"- %%x%%)")
+  innames<-paste("in",1:M,sep="")[-M]
+  bintable<-basename(tempfile("_bin_"))
+  if (is.null(y)){
+    query<-sqlsubst("create table %%new%% as select %%low%%, %%up%%, %%wt%%, %%x%% from %%old%%",
+  		list(new=bintable, old=tablename, low=paste(lowexpr,lownames,sep=" as "),
+   			up=paste(upexpr, upnames, sep=" as "), wt=wtname,x=x))
+   } else {
+    query<-sqlsubst("create table %%new%% as select %%low%%, %%up%%, %%wt%%, %%x%%, %%y%% from %%old%%",
+  		list(new=bintable, old=tablename, low=paste(lowexpr,lownames,sep=" as "),
+   			up=paste(upexpr, upnames, sep=" as "), wt=wtname,x=x,y=y))
+   	}
+  dbGetQuery(design$conn, query)
+  on.exit(dbGetQuery(design$conn,paste("drop table ",bintable)),add=TRUE)
+  dbGetQuery(design$conn, sqlsubst("create index %%idx%% on %%tbl%% (%%x%%)",
+  	list(idx=basename(tempfile("_idx_")), x=x,tbl=bintable)))
+  lbinname<-paste("lbin",1:M,sep="")[-M]
+  rbinname<-paste("rbin",1:M,sep="")[-1]
+  if (is.null(y)){
+  	lbinquery<-paste("sum(",upnames,"*%%wt%%*(%%x%% between ",gridp[-M],"AND",gridp[-1],")) as ",lbinname)
+  	rbinquery<-paste("sum(",upnames,"*%%wt%%*(%%x%% between ",gridp[-M],"AND",gridp[-1],")) as ",rbinname)
+  } else{
+  	lbinquery<-paste("sum(",upnames,"*%%wt%%*%%y%%*(%%x%% between ",gridp[-M],"AND",gridp[-1],")) as ",lbinname)
+  	rbinquery<-paste("sum(",upnames,"*%%wt%%*%%y%%*(%%x%% between ",gridp[-M],"AND",gridp[-1],")) as ",rbinname)
+  	}
+  bins<-dbGetQuery(design$conn, sqlsubst("select %%lquery%%, %%rquery%% from %%bintable%%",
+  	list(lquery=lbinquery, rquery=rbinquery, wt=wtname, tbl=tablename, 
+       bintable=bintable, x=x, y= if(!is.null(y)) y else "")))
+  bins<-as.vector(as.matrix(bins))
+  bins<-bins[1:(M-1)]+bins[M:(2*M-2)]
+  N<-dbGetQuery(design$conn, sqlsubst("select sum(%%wt%%) from %%tbl%%", 
+     list(wt=wtname,tbl=tablename)))[[1]]
+  
+  list(grid=gridp, counts = -as.vector(as.matrix(bins))/diff(gridp), sumwt=N)
+}
+
+
+sqlocpoly<-function(formula, design, bandwidth, M=401){
+	if (length(formula)==2){
+	   x<-attr(terms(formula),"term.labels")
+	   if(length(x)>1) stop('only one variable')
+	   bins<-linbin(x, table=design$table, design=design,M=M)
+	   xbinned<-with(bins,counts/(sumwt*diff(grid)))
+	   rval<-list(locpoly(rep(1,M-1), xbinned ,binned=TRUE,
+	   	bandwidth=bandwidth,range.x=range(bins$grid)))
+	   attr(rval,"ylab")<-"Density"
+	   names(rval)<-x
+	} else {
+	   if(length(formula[[3]])>1) stop('only one variable')
+	   x<-attr(terms(formula),"term.labels")
+	   if(length(x)>1) stop('only one variable')
+	   xbins<-linbin(x, table=design$table, design=design,M=M)
+	   y<-deparse(formula[[2]])
+	   ybins<-linbin(x, table=design$table, design=design,M=M,y=y)
+	   rval<-list(locpoly(xbins$counts, ybins$counts,binned=TRUE,bandwidth=bandwidth,
+	     range.x=range(xbins$grid)))
+	   names(rval)<-x
+	   attr(rval,"ylab")<-y
+   }
+   class(rval)<-"svysmooth"
+   attr(rval,"call") <- sys.call()
+   attr(rval,"density") <- (length(formula)==2)
+   rval
+}
 
 sqlexpr<-function(expr, design){
    nms<-new.env(parent=emptyenv())
@@ -166,6 +254,7 @@ rval
 
 sqlsubst<-function(strings, values){
   for(nm in names(values)){
+  	if (is.null(values[[nm]])) next
     if (length(values[[nm]])>1) values[[nm]]<-paste(values[[nm]],collapse=", ")
     strings<-gsub(paste("%%",nm,"%%",sep=""),values[[nm]], strings)
   }
@@ -664,3 +753,87 @@ sqlmmDrop<-function(mmobj){
 
 head.sqlmm<-function(x,n=6,...) dbGetQuery(x$conn,
      sqlsubst("select * from %%mm%% limit %nn%", list(mm=x$table,nn=n)))
+
+hexbinmerge<-function(h1,h2){
+	h<-h1
+	h@cID<-NULL
+	
+	extra<-!(h2@cell %in% h1@cell)
+	cells<-sort(unique(c(h1@cell, h2@cell)))
+	i1<-match(h1@cell,cells)
+	i2<-match(h2@cell,cells)
+	i2new<-match(h2@cell[extra], cells)
+	i2old<-match(h2@cell[!extra], cells)
+	
+	n<-length(cells)
+
+	count<-integer(n)
+	count[i1]<-h1@count
+	count[i2new]<-h2@count[extra]
+	count[i2old]<-count[i2old]+h2@count[!extra]
+	h@count<-count
+		
+	xcm<-numeric(n)
+	xcm[i1]<-h1@xcm
+	xcm[i2new]<-h2@xcm[extra]
+	xcm[i2old]<-xcm[i2old]*(1-h2@count[!extra]/count[i2old])+h2@xcm[!extra]*(h2@count[!extra]/count[i2old])
+	h@xcm<-xcm
+	
+	ycm<-numeric(n)
+	ycm[i1]<-h1@ycm
+	ycm[i2new]<-h2@ycm[extra]
+	ycm[i2old]<-ycm[i2old]*(1-h2@count[!extra]/count[i2old])+h2@ycm[!extra]*(h2@count[!extra]/count[i2old])
+	h@ycm<-ycm
+	
+	h@n<-as.integer(sum(count))
+	h@ncells<-n	
+	h@cell<-cells
+	h
+	}
+
+sqlhexbin<-function(formula, design, xlab=NULL,ylab=NULL, ...,chunksize=5000){
+	require("hexbin")
+	tms<-terms(formula)
+	x<-attr(tms,"term.labels")
+	if (length(x)>2) stop("only one x variable")
+	y<-deparse(formula[[2]])
+	if (is.null(design$subset)){
+   		tablename<-design$table
+    	wtname<-design$weights
+  	} else {
+    	tablename<-sqlsubst(" %%tbl%% inner join %%subset%% using(%%key%%) ",
+                        list(tbl=design$table, subset=design$subset$table, key=design$key))
+    	wtname<-design$subset$weights
+  	}
+
+	query<-sqlsubst("select min(%%x%%) as xmin, max(%%x%%) as xmax, min(%%y%%) as ymin, max(%%y%%) as ymax from %%tbl%% where %%wt%%>0", list(x=x,tbl=tablename,y=y, wt=wtname))
+	ranges<-dbGetQuery(design$conn, query)
+	xlim<-with(ranges,c(xmin,xmax))
+	ylim<-with(ranges,c(ymin,ymax))
+	N<-dbGetQuery(design$conn, sqlsubst("select count(*) from %%tbl%% where %%wt%%>0",
+	   list(tbl=tablename,wt=wtname)))[[1]]
+	
+	query<-sqlsubst("select %%x%% as x, %%y%% as y, %%wt%% as _wt from %%tbl%% where %%wt%% > 0",
+		list(x=x,y=y,tbl=tablename,wt=wtname))
+	result<-dbSendQuery(design$conn, query)
+	on.exit(dbClearResult(result))
+
+    got<-0
+    htotal<-NULL
+    while(got<N){
+    	df<-fetch(result, chunksize)
+    	if (nrow(df)==0) break
+    	h<-hexbin(df$x,df$y,ID=TRUE,xbnds=xlim,ybnds=ylim)
+    	h@count<-as.vector(tapply(df[["_wt"]],h@cID,sum))
+    	if (is.null(htotal)){
+    		htotal<-h
+    	} else 
+    		htotal<-hexbinmerge(htotal,h) 
+    	
+    }
+    if (is.null(xlab)) xlab<-x
+    if (is.null(ylab)) ylab<-y
+    
+    gplot.hexbin(htotal,xlab=xlab, ylab=ylab, ...)
+    invisible(htotal)
+	}

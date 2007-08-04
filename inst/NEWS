@@ -1,2 +1,17 @@
+0.3 faster creation from existing SQLite database
+
+    added sqlocpoly for smoothing and density estimation
+
+    added sqlhexbin
+    
+    open.sqlsurvey() now checks for the existence of the file
+
+    sqlsubst() allows (and ignores) NULL replacement values
+
+
+0.2 added svylm
+
+    allowed sampling with replacement
+
 0.1  Initial version
 
